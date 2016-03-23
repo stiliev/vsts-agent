@@ -100,6 +100,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
 
             Trace.Info("Done evaluating commands");
             await configManager.EnsureConfiguredAsync();
+
+            // TODO: If configured as runasservice return from here
             
             return await RunAsync();
         }

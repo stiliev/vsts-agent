@@ -88,8 +88,48 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                 inputs,
                 taskDirectory: definition.Directory);
 
-            // Run the task.
-            await handler.RunAsync();
+            List<Exception> allExs = new List<Exception>();
+            try
+            {
+                // Run the task.
+                await handler.RunAsync();
+            }
+            catch (Exception ex)
+            {
+                allExs.Add(ex);
+            }
+
+            // TODO: Merge result from ##vso command task queue.
+            var context = ExecutionContext as ExecutionContext;
+            ArgUtil.NotNull(context, nameof(context));
+
+            // we will let all async commands run to finish.
+            foreach (var command in context.AsyncCommands)
+            {
+                TaskResult asyncCommandResult = TaskResult.Succeeded;
+                try
+                {
+                    // wait async command to finish.
+                    await command.RunToFinish();
+                }
+                catch (Exception ex)
+                {
+                    asyncCommandResult = TaskResult.Failed;
+                    allExs.Add(ex);
+                }
+
+                // fail the step if any async command failed.
+                if (asyncCommandResult == TaskResult.Failed)
+                {
+                    ExecutionContext.Result = asyncCommandResult;
+                }
+            }
+
+            // deal all exceptions;
+            if (allExs.Count > 0)
+            {
+                throw new AggregateException(allExs).Flatten();
+            }
         }
     }
 }

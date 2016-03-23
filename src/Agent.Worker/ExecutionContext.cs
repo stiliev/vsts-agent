@@ -1,9 +1,11 @@
 using Microsoft.TeamFoundation.DistributedTask.WebApi;
 using Microsoft.VisualStudio.Services.Agent.Util;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Microsoft.VisualStudio.Services.Agent.Worker
 {
@@ -37,6 +39,75 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
         void UpdateDetailTimelineRecord(TimelineRecord record);
     }
 
+    public class AsyncCommandContext
+    {
+        private IExecutionContext ExecutionContext { get; }
+        private string Name { get; }
+        public Task Task { get; set; }
+        private readonly ConcurrentQueue<string> outputQueue = new ConcurrentQueue<string>();
+        private readonly TaskCompletionSource<int> asyncCommandCompleted = new TaskCompletionSource<int>();
+
+        public AsyncCommandContext(IExecutionContext context, string name)
+        {
+            ExecutionContext = context;
+            Name = name;
+        }
+
+        public void Output(string message)
+        {
+            outputQueue.Enqueue(message);
+        }
+
+        public void Warning(string message)
+        {
+            outputQueue.Enqueue($"{WellKnownTags.Warning}{message}");
+        }
+
+        public void Error(string message)
+        {
+            outputQueue.Enqueue($"{WellKnownTags.Error}{message}");
+        }
+
+        // the result for an async command is only succeeded or failed.
+        public async Task RunToFinish()
+        {
+            Task flushOutput = FlushOutput();
+            try
+            {
+                await Task;
+            }
+            finally
+            {
+                asyncCommandCompleted.TrySetResult(0);
+                await flushOutput;
+            }
+        }
+
+        private async Task FlushOutput()
+        {
+            ExecutionContext.Section($"Async Command Start: {Name}");
+
+            string output;
+            while (!asyncCommandCompleted.Task.IsCompleted)
+            {
+                while (outputQueue.TryDequeue(out output))
+                {
+                    ExecutionContext.Output(output);
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(500));
+            }
+
+            // Dequeue one more time make sure all outputs been flush out.
+            while (outputQueue.TryDequeue(out output))
+            {
+                ExecutionContext.Output(output);
+            }
+
+            ExecutionContext.Section($"Async Command End: {Name}");
+        }
+    }
+
     public sealed class ExecutionContext : AgentService, IExecutionContext
     {
         private const int _maxIssueCount = 10;
@@ -58,6 +129,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
         public List<ServiceEndpoint> Endpoints { get; private set; }
         public Variables Variables { get; private set; }
         public bool WriteDebug { get; private set; }
+
+        public List<AsyncCommandContext> AsyncCommands = new List<AsyncCommandContext>();
 
         public TaskResult? Result
         {
@@ -248,6 +321,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
 
             // Initialize the environment.
             Endpoints = message.Environment.Endpoints;
+            Endpoints.Add(message.Environment.SystemConnection);
+
             List<string> warnings;
             Variables = new Variables(HostContext, message.Environment.Variables, out warnings);
 
